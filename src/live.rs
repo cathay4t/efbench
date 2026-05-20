@@ -2,7 +2,10 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -18,10 +21,13 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     symbols::Marker,
     text::{Line, Span},
-    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph},
+    widgets::{
+        Block, Borders, Paragraph,
+        canvas::{Canvas, Context, Line as CanvasLine},
+    },
 };
 use tokio::sync::mpsc;
 
@@ -96,36 +102,35 @@ impl AppData {
     }
 }
 
-fn make_chart<'a>(
+fn make_canvas<'a>(
     title: &'a str,
-    datasets: Vec<Dataset<'a>>,
-    _y_label: &'a str,
+    data: Vec<(f64, f64)>,
     y_max: f64,
-) -> Chart<'a> {
+    color: Color,
+) -> Canvas<'a, impl Fn(&mut Context)> {
     let y_max = if y_max <= 0.0 { 1.0 } else { y_max * 1.1 };
 
-    Chart::new(datasets)
+    Canvas::default()
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
                 .title_alignment(Alignment::Center),
         )
-        .x_axis(
-            Axis::default()
-                .bounds([0.0, MAX_POINTS as f64])
-                .labels(vec![
-                    Span::raw("0"),
-                    Span::raw(format!("{}s", MAX_POINTS / 2)),
-                    Span::raw(format!("{}s", MAX_POINTS)),
-                ])
-                .style(Style::default().gray()),
-        )
-        .y_axis(
-            Axis::default()
-                .bounds([0.0, y_max])
-                .style(Style::default().gray()),
-        )
+        .x_bounds([0.0, MAX_POINTS as f64])
+        .y_bounds([0.0, y_max])
+        .marker(Marker::Braille)
+        .paint(move |ctx| {
+            for pair in data.windows(2) {
+                ctx.draw(&CanvasLine {
+                    x1: pair[0].0,
+                    y1: pair[0].1,
+                    x2: pair[1].0,
+                    y2: pair[1].1,
+                    color,
+                });
+            }
+        })
 }
 
 fn draw_ui(frame: &mut ratatui::Frame, app: &AppData) {
@@ -186,19 +191,7 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppData) {
     let latency_title =
         format!("Latency (μs)  [cur: {:.0}]", app.current_latency);
     frame.render_widget(
-        make_chart(
-            &latency_title,
-            vec![
-                Dataset::default()
-                    .name("latency")
-                    .marker(Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Color::Cyan)
-                    .data(&latency_data),
-            ],
-            "μs",
-            max_latency,
-        ),
+        make_canvas(&latency_title, latency_data, max_latency, Color::Cyan),
         rows_left[0],
     );
 
@@ -212,19 +205,7 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppData) {
     let tp_title =
         format!("Throughput (req/s)  [cur: {}]", app.current_throughput);
     frame.render_widget(
-        make_chart(
-            &tp_title,
-            vec![
-                Dataset::default()
-                    .name("throughput")
-                    .marker(Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Color::Green)
-                    .data(&tp_data),
-            ],
-            "req/s",
-            max_tp,
-        ),
+        make_canvas(&tp_title, tp_data, max_tp, Color::Green),
         rows_right[0],
     );
 
@@ -240,19 +221,7 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppData) {
         app.current_rx as f64 / (1024.0 * 1024.0)
     );
     frame.render_widget(
-        make_chart(
-            &rx_title,
-            vec![
-                Dataset::default()
-                    .name("RX")
-                    .marker(Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Color::Yellow)
-                    .data(&rx_data),
-            ],
-            "MiB/s",
-            max_rx,
-        ),
+        make_canvas(&rx_title, rx_data, max_rx, Color::Yellow),
         rows_left[1],
     );
 
@@ -268,19 +237,7 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppData) {
         app.current_tx as f64 / (1024.0 * 1024.0)
     );
     frame.render_widget(
-        make_chart(
-            &tx_title,
-            vec![
-                Dataset::default()
-                    .name("TX")
-                    .marker(Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Color::Magenta)
-                    .data(&tx_data),
-            ],
-            "MiB/s",
-            max_tx,
-        ),
+        make_canvas(&tx_title, tx_data, max_tx, Color::Magenta),
         rows_right[1],
     );
 
@@ -305,16 +262,14 @@ pub fn run_tui(
 
     loop {
         // Check for key press (non-blocking)
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
                     && key.code == KeyCode::Char('q')
                 {
                     stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     break;
                 }
-            }
-        }
 
         // Drain available metrics
         while let Ok(m) = rx.try_recv() {
@@ -335,5 +290,57 @@ pub fn run_tui(
 
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    Ok(())
+}
+
+pub async fn run_live(
+    iface: String,
+    ip: String,
+    port: u16,
+) -> anyhow::Result<()> {
+    crate::check_interface(&iface)?;
+    let server_addr = format!("{ip}:{port}");
+    crate::check_connection(&server_addr).await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let state = Arc::new(Mutex::new(crate::BenchState {
+        total_latency_us: 0,
+        req_count: 0,
+    }));
+    let app_data = Arc::new(Mutex::new(AppData::new(ip.clone(), port)));
+
+    let (metrics_tx, metrics_rx) = mpsc::channel::<Metrics>(16);
+
+    let b_state = state.clone();
+    let b_stop = stop.clone();
+    let b_addr = server_addr.clone();
+    let b_iface = iface.clone();
+    let bench_handle = tokio::spawn(async move {
+        if let Err(e) =
+            crate::benchmark_loop(b_addr, b_iface, b_state, b_stop).await
+        {
+            eprintln!("Benchmark error: {e}");
+        }
+    });
+
+    let r_state = state.clone();
+    let r_stop = stop.clone();
+    let r_iface = iface.clone();
+    let r_tx = metrics_tx.clone();
+    let report_handle = tokio::spawn(async move {
+        crate::reporter_task(r_iface, r_state, r_tx, r_stop).await;
+    });
+
+    let t_app_data = app_data.clone();
+    let t_stop = stop.clone();
+    let t_handle = tokio::task::spawn_blocking(move || {
+        run_tui(metrics_rx, t_app_data, t_stop)
+    });
+
+    t_handle.await??;
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = bench_handle.await;
+    let _ = report_handle.await;
+
     Ok(())
 }

@@ -1,6 +1,86 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+
+use tokio::sync::mpsc;
+
 use crate::Metrics;
+
+pub async fn run_plot(
+    iface: String,
+    ip: String,
+    port: u16,
+    output: String,
+) -> anyhow::Result<()> {
+    crate::check_interface(&iface)?;
+    let server_addr = format!("{ip}:{port}");
+    crate::check_connection(&server_addr).await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let state = Arc::new(Mutex::new(crate::BenchState {
+        total_latency_us: 0,
+        req_count: 0,
+    }));
+
+    let (metrics_tx, mut metrics_rx) = mpsc::channel::<Metrics>(4096);
+
+    let b_state = state.clone();
+    let b_stop = stop.clone();
+    let b_addr = server_addr.clone();
+    let b_iface = iface.clone();
+    let bench_handle = tokio::spawn(async move {
+        if let Err(e) =
+            crate::benchmark_loop(b_addr, b_iface, b_state, b_stop).await
+        {
+            eprintln!("Benchmark error: {e}");
+        }
+    });
+
+    let r_state = state.clone();
+    let r_stop = stop.clone();
+    let r_iface = iface.clone();
+    let r_tx = metrics_tx.clone();
+    let report_handle = tokio::spawn(async move {
+        crate::reporter_task(r_iface, r_state, r_tx, r_stop).await;
+    });
+
+    let mut all_metrics: Vec<Metrics> = Vec::new();
+    let ctrlc_stop = stop.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        ctrlc_stop.store(true, Ordering::Relaxed);
+    });
+
+    println!("Benchmark running... Press Ctrl-C to stop.");
+
+    loop {
+        tokio::select! {
+            Some(m) = metrics_rx.recv() => {
+                all_metrics.push(m);
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                if stop.load(Ordering::Relaxed) {
+                    while let Ok(m) = metrics_rx.try_recv() {
+                        all_metrics.push(m);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = bench_handle.await;
+    let _ = report_handle.await;
+
+    save_plot(&all_metrics, &output)?;
+    Ok(())
+}
 
 pub fn save_plot(metrics: &[Metrics], output: &str) -> anyhow::Result<()> {
     use plotters::prelude::*;
@@ -34,7 +114,7 @@ pub fn save_plot(metrics: &[Metrics], output: &str) -> anyhow::Result<()> {
             ))?
             .label("latency")
             .legend(|(x, y)| {
-                PathElement::new(vec![(x, y), (x + 20, y)], &CYAN)
+                PathElement::new(vec![(x, y), (x + 20, y)], CYAN)
             });
         chart.configure_series_labels().draw()?;
     }
@@ -58,7 +138,7 @@ pub fn save_plot(metrics: &[Metrics], output: &str) -> anyhow::Result<()> {
             ))?
             .label("throughput")
             .legend(|(x, y)| {
-                PathElement::new(vec![(x, y), (x + 20, y)], &GREEN)
+                PathElement::new(vec![(x, y), (x + 20, y)], GREEN)
             });
         chart.configure_series_labels().draw()?;
     }
@@ -84,7 +164,7 @@ pub fn save_plot(metrics: &[Metrics], output: &str) -> anyhow::Result<()> {
             ))?
             .label("RX")
             .legend(|(x, y)| {
-                PathElement::new(vec![(x, y), (x + 20, y)], &YELLOW)
+                PathElement::new(vec![(x, y), (x + 20, y)], YELLOW)
             });
         chart.configure_series_labels().draw()?;
     }
@@ -110,7 +190,7 @@ pub fn save_plot(metrics: &[Metrics], output: &str) -> anyhow::Result<()> {
             ))?
             .label("TX")
             .legend(|(x, y)| {
-                PathElement::new(vec![(x, y), (x + 20, y)], &MAGENTA)
+                PathElement::new(vec![(x, y), (x + 20, y)], MAGENTA)
             });
         chart.configure_series_labels().draw()?;
     }

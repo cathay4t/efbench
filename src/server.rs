@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     println!("efbench-server listening on {addr}");
 
     Server::builder()
-        .add_service(BenchmarkServer::new(BenchmarkService::default()))
+        .add_service(BenchmarkServer::new(BenchmarkService))
         .serve(addr)
         .await?;
 

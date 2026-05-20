@@ -16,7 +16,7 @@ use clap::{Parser, Subcommand};
 use efbench::proto::{Ping, benchmark_client::BenchmarkClient};
 use tokio::sync::mpsc;
 
-struct BenchState {
+pub(crate) struct BenchState {
     total_latency_us: u128,
     req_count: u64,
 }
@@ -60,7 +60,7 @@ enum Command {
     },
 }
 
-fn check_interface(iface: &str) -> anyhow::Result<()> {
+pub(crate) fn check_interface(iface: &str) -> anyhow::Result<()> {
     let path = format!("/sys/class/net/{iface}");
     if !std::path::Path::new(&path).is_dir() {
         anyhow::bail!("network interface '{iface}' not found at {path}");
@@ -68,7 +68,7 @@ fn check_interface(iface: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn check_connection(server_addr: &str) -> anyhow::Result<()> {
+pub(crate) async fn check_connection(server_addr: &str) -> anyhow::Result<()> {
     BenchmarkClient::connect(format!("http://{server_addr}"))
         .await
         .map_err(|e| {
@@ -77,7 +77,7 @@ async fn check_connection(server_addr: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_net_stat(iface: &str, stat: &str) -> u64 {
+pub(crate) fn read_net_stat(iface: &str, stat: &str) -> u64 {
     let path = format!("/sys/class/net/{iface}/statistics/{stat}");
     fs::read_to_string(&path)
         .ok()
@@ -85,7 +85,7 @@ fn read_net_stat(iface: &str, stat: &str) -> u64 {
         .unwrap_or(0)
 }
 
-async fn benchmark_loop(
+pub(crate) async fn benchmark_loop(
     server_addr: String,
     _iface: String,
     state: Arc<Mutex<BenchState>>,
@@ -130,7 +130,7 @@ async fn benchmark_loop(
     Ok(())
 }
 
-async fn reporter_task(
+pub(crate) async fn reporter_task(
     iface: String,
     state: Arc<Mutex<BenchState>>,
     metrics_tx: mpsc::Sender<Metrics>,
@@ -186,126 +186,13 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Live { iface, ip, port } => {
-            check_interface(&iface)?;
-            let server_addr = format!("{ip}:{port}");
-            check_connection(&server_addr).await?;
-            let stop = Arc::new(AtomicBool::new(false));
-            let state = Arc::new(Mutex::new(BenchState {
-                total_latency_us: 0,
-                req_count: 0,
-            }));
-            let app_data =
-                Arc::new(Mutex::new(live::AppData::new(ip.clone(), port)));
-
-            let (metrics_tx, metrics_rx) = mpsc::channel::<Metrics>(16);
-
-            // Spawn benchmark task
-            let b_state = state.clone();
-            let b_stop = stop.clone();
-            let b_addr = server_addr.clone();
-            let b_iface = iface.clone();
-            let bench_handle = tokio::spawn(async move {
-                if let Err(e) =
-                    benchmark_loop(b_addr, b_iface, b_state, b_stop).await
-                {
-                    eprintln!("Benchmark error: {e}");
-                }
-            });
-
-            // Spawn reporter task
-            let r_state = state.clone();
-            let r_stop = stop.clone();
-            let r_iface = iface.clone();
-            let r_tx = metrics_tx.clone();
-            let report_handle = tokio::spawn(async move {
-                reporter_task(r_iface, r_state, r_tx, r_stop).await;
-            });
-
-            // Run TUI on main thread (actually this is inside tokio::main, but
-            // we use spawn_blocking for the synchronous TUI)
-            let t_app_data = app_data.clone();
-            let t_stop = stop.clone();
-            let t_handle = tokio::task::spawn_blocking(move || {
-                live::run_tui(metrics_rx, t_app_data, t_stop)
-            });
-
-            t_handle.await??;
-
-            stop.store(true, Ordering::Relaxed);
-            let _ = bench_handle.await;
-            let _ = report_handle.await;
+            live::run_live(iface, ip, port).await
         }
         Command::Plot {
             iface,
             ip,
             port,
             output,
-        } => {
-            check_interface(&iface)?;
-            let server_addr = format!("{ip}:{port}");
-            check_connection(&server_addr).await?;
-            let stop = Arc::new(AtomicBool::new(false));
-            let state = Arc::new(Mutex::new(BenchState {
-                total_latency_us: 0,
-                req_count: 0,
-            }));
-
-            let (metrics_tx, mut metrics_rx) = mpsc::channel::<Metrics>(4096);
-
-            let b_state = state.clone();
-            let b_stop = stop.clone();
-            let b_addr = server_addr.clone();
-            let b_iface = iface.clone();
-            let bench_handle = tokio::spawn(async move {
-                if let Err(e) =
-                    benchmark_loop(b_addr, b_iface, b_state, b_stop).await
-                {
-                    eprintln!("Benchmark error: {e}");
-                }
-            });
-
-            let r_state = state.clone();
-            let r_stop = stop.clone();
-            let r_iface = iface.clone();
-            let r_tx = metrics_tx.clone();
-            let report_handle = tokio::spawn(async move {
-                reporter_task(r_iface, r_state, r_tx, r_stop).await;
-            });
-
-            let mut all_metrics: Vec<Metrics> = Vec::new();
-            let ctrlc_stop = stop.clone();
-            tokio::spawn(async move {
-                tokio::signal::ctrl_c().await.ok();
-                ctrlc_stop.store(true, Ordering::Relaxed);
-            });
-
-            println!("Benchmark running... Press Ctrl-C to stop.");
-
-            // Collect metrics until stop
-            loop {
-                tokio::select! {
-                    Some(m) = metrics_rx.recv() => {
-                        all_metrics.push(m);
-                    }
-                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                        if stop.load(Ordering::Relaxed) {
-                            // Drain remaining
-                            while let Ok(m) = metrics_rx.try_recv() {
-                                all_metrics.push(m);
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-
-            stop.store(true, Ordering::Relaxed);
-            let _ = bench_handle.await;
-            let _ = report_handle.await;
-
-            plot::save_plot(&all_metrics, &output)?;
-        }
+        } => plot::run_plot(iface, ip, port, output).await,
     }
-
-    Ok(())
 }
