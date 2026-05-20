@@ -1,0 +1,15 @@
+syntax = "proto3";
+package benchmark;
+
+service Benchmark {
+  rpc PingPong(stream Ping) returns (stream Pong);
+}
+
+message Ping {
+  uint64 seq = 1;
+  uint64 sent_ns = 2;
+}
+
+message Pong {
+  bytes data = 1;
+}

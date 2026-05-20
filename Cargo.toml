@@ -1,0 +1,30 @@
+[package]
+name = "efbench"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[dependencies]
+anyhow = "1"
+async-stream = "0.3"
+chrono = "0.4"
+plotters = "0.3"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+prost = "0.14"
+ratatui = "0.29"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
+tokio-stream = "0.1"
+tonic = "0.14"
+tonic-prost = "0.14"
+
+[[bin]]
+name = "efbench-server"
+path = "src/server.rs"
+
+[[bin]]
+name = "efbench-client"
+path = "src/client.rs"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
