@@ -113,9 +113,7 @@ pub fn save_plot(metrics: &[Metrics], output: &str) -> anyhow::Result<()> {
                 &CYAN,
             ))?
             .label("latency")
-            .legend(|(x, y)| {
-                PathElement::new(vec![(x, y), (x + 20, y)], CYAN)
-            });
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], CYAN));
         chart.configure_series_labels().draw()?;
     }
 

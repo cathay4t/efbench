@@ -46,6 +46,8 @@ enum Command {
         ip: String,
         #[arg(long)]
         port: u16,
+        #[arg(long, default_value = "benchmark_output")]
+        output: String,
     },
     /// Run benchmark and save results
     Plot {
@@ -185,9 +187,12 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Live { iface, ip, port } => {
-            live::run_live(iface, ip, port).await
-        }
+        Command::Live {
+            iface,
+            ip,
+            port,
+            output,
+        } => live::run_live(iface, ip, port, output).await,
         Command::Plot {
             iface,
             ip,

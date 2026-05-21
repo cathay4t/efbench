@@ -250,6 +250,7 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &AppData) {
 pub fn run_tui(
     metrics_rx: mpsc::Receiver<Metrics>,
     app_data: Arc<Mutex<AppData>>,
+    all_metrics: Arc<Mutex<Vec<Metrics>>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
@@ -264,18 +265,21 @@ pub fn run_tui(
         // Check for key press (non-blocking)
         if event::poll(Duration::from_millis(50))?
             && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-                    && key.code == KeyCode::Char('q')
-                {
-                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                    break;
-                }
+            && key.kind == KeyEventKind::Press
+            && key.code == KeyCode::Char('q')
+        {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            break;
+        }
 
         // Drain available metrics
         while let Ok(m) = rx.try_recv() {
             if let Ok(mut app) = app_data.lock() {
                 app.push_metrics(m);
                 app.connected = true;
+            }
+            if let Ok(mut all) = all_metrics.lock() {
+                all.push(m);
             }
         }
 
@@ -297,6 +301,7 @@ pub async fn run_live(
     iface: String,
     ip: String,
     port: u16,
+    output: String,
 ) -> anyhow::Result<()> {
     crate::check_interface(&iface)?;
     let server_addr = format!("{ip}:{port}");
@@ -307,6 +312,8 @@ pub async fn run_live(
         req_count: 0,
     }));
     let app_data = Arc::new(Mutex::new(AppData::new(ip.clone(), port)));
+    let all_metrics: Arc<Mutex<Vec<Metrics>>> =
+        Arc::new(Mutex::new(Vec::new()));
 
     let (metrics_tx, metrics_rx) = mpsc::channel::<Metrics>(16);
 
@@ -331,9 +338,10 @@ pub async fn run_live(
     });
 
     let t_app_data = app_data.clone();
+    let t_all_metrics = all_metrics.clone();
     let t_stop = stop.clone();
     let t_handle = tokio::task::spawn_blocking(move || {
-        run_tui(metrics_rx, t_app_data, t_stop)
+        run_tui(metrics_rx, t_app_data, t_all_metrics, t_stop)
     });
 
     t_handle.await??;
@@ -341,6 +349,9 @@ pub async fn run_live(
     stop.store(true, Ordering::Relaxed);
     let _ = bench_handle.await;
     let _ = report_handle.await;
+
+    let metrics = all_metrics.lock().unwrap().clone();
+    crate::plot::save_plot(&metrics, &output)?;
 
     Ok(())
 }
